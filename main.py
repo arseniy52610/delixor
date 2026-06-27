@@ -261,6 +261,7 @@ async def cmd_start(message: MessageType):
     session = SQLSession(db.engine)
     webapp_url = build_webapp_url(session, message.from_user)
     sent = await message.answer(
+        "<tg-emoji emoji-id="5469986291380657759">✌️</tg-emoji>"
         f"👋 Привет, {html.bold(message.from_user.full_name)}!\n\n"
         "Delixor сохраняет удалённые и изменённые сообщения в чатах. Ничего лишнего — только контроль и прозрачность",
         reply_markup=start_keyboard(webapp_url),
