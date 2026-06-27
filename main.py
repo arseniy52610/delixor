@@ -23,7 +23,7 @@ from sqlmodel import Field, SQLModel, Session as SQLSession, select
 
 import db
 
-TOKEN = "8016703176:AAFU1xJESuJyCqe2gTPeNLAW0_sn56T0tvE"
+TOKEN = "8016703176:AAHeEpjl5UJp_Meg0H6OkZ44HEx3-WU4SGI"
 BOT_USERNAME = "testing_lirikoww_bot"
 
 bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
