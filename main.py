@@ -103,12 +103,12 @@ def start_keyboard(webapp_url: str) -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="💫 Delixor",
+                    text=" DelixorMod", icon_custom_emoji_id="5334821222444212525", style="primary",
                     web_app=WebAppInfo(url=webapp_url),
                 ),
-                InlineKeyboardButton(text="📖 Ваши чаты", callback_data="all_chats")],
+                InlineKeyboardButton(text=" Ваши чаты", icon_custom_emoji_id="5264976953902900857", callback_data="all_chats")],
             [
-                InlineKeyboardButton(text="📣 Наш канал", url="https://t.me/delixornews"),
+                InlineKeyboardButton(text=" Наш канал", url="https://t.me/delixornews", icon_custom_emoji_id="5452002597592382164"),
             ],
         ]
     )
@@ -229,7 +229,7 @@ async def send_subscription_invoice(
     await bot_instance.send_invoice(
         chat_id=user_id,
         title=title,
-        description=f"💫 Delixor - модифицированный мод для Telegram{title}",
+        description=f"💫 Delixor - модифицированный мод для Telegram от разработчиков BynexVPN{title}",
         payload=f"pay_{period}_{user_id}_{int(datetime.now().timestamp())}",
         currency="XTR",
         prices=[{"label": title, "amount": amount}],
@@ -260,12 +260,15 @@ async def cmd_start(message: MessageType):
 
     session = SQLSession(db.engine)
     webapp_url = build_webapp_url(session, message.from_user)
+
     sent = await message.answer(
-        "<tg-emoji emoji-id="5469986291380657759">✌️</tg-emoji>"
-        f"👋 Привет, {html.bold(message.from_user.full_name)}!\n\n"
-        "Delixor сохраняет удалённые и изменённые сообщения в чатах. Ничего лишнего — только контроль и прозрачность",
-        reply_markup=start_keyboard(webapp_url),
-    )
+    f'<tg-emoji emoji-id="5469986291380657759">✌️</tg-emoji> '
+    f'Привет, {html.bold(message.from_user.full_name)}!\n\n'
+    'Delixor сохраняет удалённые и изменённые сообщения в чатах. '
+    'Ничего лишнего — только контроль и прозрачность',
+    parse_mode="HTML",
+    reply_markup=start_keyboard(webapp_url),
+)
     store_menu_state(session, message.from_user.id, sent.chat.id, sent.message_id)
 
 
@@ -729,7 +732,8 @@ async def handle_edited_business_message(message: MessageType):
         await message.bot.send_message(
             chat_id=bc.user_chat_id,
             text=(
-                f"<b>✏️@{username} изменил сообщение</b>\n"
+                f'<tg-emoji emoji-id="5334952532479351827">📝</tg-emoji> '
+                f" <b>@{username} изменил(а) сообщение</b>\n"
                 f"<blockquote>💬{old_content} ➜ {message.text}</blockquote>"
             ),
         )
@@ -764,11 +768,12 @@ async def handle_deleted_business_messages(deleted: BusinessMessagesDeleted):
         stored_message.is_deleted = True
         session.add(stored_message)
         username = stored_message.from_username or stored_message.from_name
-        media_caption = f"🗑️ @{username} удалил медиа"
+        media_caption = f"🗑️ @{username} удалил(а) медиа"
         await deleted.bot.send_message(
             chat_id=bc.user_chat_id,
             text=(
-                f"<b>🗑️@{username} удалил сообщение</b>\n"
+                f'<tg-emoji emoji-id="5332372777552881448">🗑️</tg-emoji> '
+                f" <b>@{username} удалил(а) сообщение</b>\n"
                 f"<blockquote>💬{original_content}</blockquote>"
             ),
         )
