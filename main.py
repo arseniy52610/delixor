@@ -332,7 +332,7 @@ async def cb_info(callback: CallbackQuery):
         [InlineKeyboardButton(text="Пользовательское соглашение", url="https://telegra.ph/Polzovatelskoe-soglashenie-06-28-25")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="back")]
     ])
-    await callback.message.edit_text("ℹ️ <b>Информация</b>\n\nПоддержка: BynexSuppBot\n\nВыберите нужный документ:", reply_markup=kb)
+    await callback.message.edit_text("ℹ️ <b>Информация</b>\n\nПоддержка: @BynexSuppBot\n\nВыберите нужный документ:", reply_markup=kb)
 @dp.callback_query(lambda c: c.data == "profile")
 async def cb_profile(callback: CallbackQuery):
     session = SQLSession(db.engine)
