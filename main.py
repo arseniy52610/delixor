@@ -156,7 +156,6 @@ def api_get_chats():
     user_id = user['id']
     session = SQLSession(db.engine)
     
-    # Получаем все уникальные чаты пользователя
     chats = session.exec(
         select(ChatMessage.unique_chat_id)
         .where(ChatMessage.unique_chat_id.like(f"{user_id}_%"))
@@ -165,14 +164,12 @@ def api_get_chats():
     
     result = []
     for unique_chat_id in chats:
-        # Последнее сообщение в чате
         last_msg = session.exec(
             select(ChatMessage)
             .where(ChatMessage.unique_chat_id == unique_chat_id)
             .order_by(ChatMessage.created_at.desc())
         ).first()
         
-        # Имя собеседника
         other_user_id = int(unique_chat_id.split('_', 1)[1]) if '_' in unique_chat_id else 0
         peer_name = "Неизвестный"
         
@@ -186,7 +183,6 @@ def api_get_chats():
             if peer_msg:
                 peer_name = peer_msg.from_name or peer_msg.from_username or f"ID {other_user_id}"
         
-        # Количество сообщений
         msg_count = session.exec(
             select(ChatMessage)
             .where(ChatMessage.unique_chat_id == unique_chat_id)
@@ -202,7 +198,6 @@ def api_get_chats():
             'unread_count': 0
         })
     
-    # Сортируем по времени последнего сообщения
     result.sort(key=lambda x: x['last_message_at'] or '', reverse=True)
     
     session.close()
@@ -222,7 +217,6 @@ def api_get_chat_history(chat_id):
     
     user_id = user['id']
     
-    # Проверяем что чат принадлежит пользователю
     if not chat_id.startswith(f"{user_id}_"):
         return jsonify({'error': 'Access denied'}), 403
     
@@ -236,7 +230,6 @@ def api_get_chat_history(chat_id):
     result = []
     for msg in messages:
         content = msg.content or ''
-        # Убираем маркер удаления из текста
         is_deleted = msg.is_deleted or '🗑️' in content
         if is_deleted:
             content = content.replace('🗑️', '').strip()
@@ -266,7 +259,6 @@ def api_settings():
         return jsonify({'error': 'Unauthorized'}), 401
     
     if request.method == 'POST':
-        # Сохраняем настройки (пока просто возвращаем OK)
         data = request.json or {}
         return jsonify({'status': 'ok', 'settings': data})
     
@@ -357,7 +349,7 @@ def is_user_active(session: SQLSession, user_id: int) -> bool:
 
 
 def build_webapp_url(session: SQLSession, user) -> str:
-    base_url = "https://arseniy52610.github.io/DelixorMiniApp/"
+    base_url = "https://arseniy52610.github.io/DelixorMiniApp/"  # ⚠️ ЗАМЕНИ НА СВОЙ URL!
     user_id = user.id
     status = session.get(BusinessStatus, user_id)
 
