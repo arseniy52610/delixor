@@ -1,5 +1,10 @@
 import asyncio
 import logging
+import threading
+import hmac
+import hashlib
+import json
+import os
 from datetime import datetime, timedelta
 from urllib.parse import urlencode
 from uuid import uuid4
@@ -20,6 +25,8 @@ from aiogram.types import (
 )
 from babel.dates import format_date
 from sqlmodel import Field, SQLModel, Session as SQLSession, select
+from flask import Flask, jsonify, request
+from flask_cors import CORS
 
 import db
 
@@ -31,6 +38,280 @@ dp = Dispatcher()
 
 ADMINS = [1947766225]
 
+
+# ============ Flask API ============
+api_app = Flask(__name__)
+CORS(api_app, resources={r"/api/*": {"origins": "*"}})
+
+
+def validate_telegram_data(init_data: str) -> bool:
+    """Проверка подписи Telegram WebApp initData"""
+    if not init_data:
+        return False
+    try:
+        params = {}
+        for part in init_data.split('&'):
+            if '=' in part:
+                k, v = part.split('=', 1)
+                params[k] = v
+        
+        if 'hash' not in params:
+            return False
+        
+        hash_check = params.pop('hash')
+        data_check_string = '\n'.join(f'{k}={v}' for k, v in sorted(params.items()))
+        secret_key = hmac.new(b'WebAppData', TOKEN.encode(), hashlib.sha256).digest()
+        calculated_hash = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
+        return hmac.compare_digest(calculated_hash, hash_check)
+    except Exception:
+        return False
+
+
+def get_user_from_init(init_data: str) -> dict | None:
+    """Получаем user данные из initData"""
+    if not init_data:
+        return None
+    try:
+        params = {}
+        for part in init_data.split('&'):
+            if '=' in part:
+                k, v = part.split('=', 1)
+                params[k] = v
+        
+        user_json = params.get('user')
+        if not user_json:
+            return None
+        return json.loads(user_json)
+    except Exception:
+        return None
+
+
+def get_init_data_from_request() -> str:
+    """Получить initData из заголовка Authorization"""
+    auth = request.headers.get('Authorization', '')
+    if auth.startswith('tma '):
+        return auth[4:]
+    return request.args.get('initData', '')
+
+
+@api_app.route('/api/user', methods=['GET'])
+def api_get_user():
+    init_data = get_init_data_from_request()
+    if not validate_telegram_data(init_data):
+        return jsonify({'error': 'Unauthorized'}), 401
+    
+    user = get_user_from_init(init_data)
+    if not user:
+        return jsonify({'error': 'No user'}), 400
+    
+    session = SQLSession(db.engine)
+    sub = session.get(Subscription, user['id'])
+    
+    result = {
+        'id': user['id'],
+        'username': user.get('username', ''),
+        'first_name': user.get('first_name', ''),
+        'last_name': user.get('last_name', ''),
+    }
+    session.close()
+    return jsonify(result)
+
+
+@api_app.route('/api/subscription', methods=['GET'])
+def api_get_subscription():
+    init_data = get_init_data_from_request()
+    if not validate_telegram_data(init_data):
+        return jsonify({'error': 'Unauthorized'}), 401
+    
+    user = get_user_from_init(init_data)
+    if not user:
+        return jsonify({'error': 'No user'}), 400
+    
+    session = SQLSession(db.engine)
+    sub = session.get(Subscription, user['id'])
+    session.close()
+    
+    if sub and sub.active_until and sub.active_until > datetime.now():
+        days_left = (sub.active_until - datetime.now()).days
+        return jsonify({
+            'is_active': True,
+            'days_left': days_left,
+            'active_until': sub.active_until.isoformat()
+        })
+    
+    return jsonify({'is_active': False, 'days_left': 0})
+
+
+@api_app.route('/api/chats', methods=['GET'])
+def api_get_chats():
+    """Получить список чатов пользователя"""
+    init_data = get_init_data_from_request()
+    if not validate_telegram_data(init_data):
+        return jsonify({'error': 'Unauthorized'}), 401
+    
+    user = get_user_from_init(init_data)
+    if not user:
+        return jsonify({'error': 'No user'}), 400
+    
+    user_id = user['id']
+    session = SQLSession(db.engine)
+    
+    # Получаем все уникальные чаты пользователя
+    chats = session.exec(
+        select(ChatMessage.unique_chat_id)
+        .where(ChatMessage.unique_chat_id.like(f"{user_id}_%"))
+        .distinct()
+    ).all()
+    
+    result = []
+    for unique_chat_id in chats:
+        # Последнее сообщение в чате
+        last_msg = session.exec(
+            select(ChatMessage)
+            .where(ChatMessage.unique_chat_id == unique_chat_id)
+            .order_by(ChatMessage.created_at.desc())
+        ).first()
+        
+        # Имя собеседника
+        other_user_id = int(unique_chat_id.split('_', 1)[1]) if '_' in unique_chat_id else 0
+        peer_name = "Неизвестный"
+        
+        if other_user_id and other_user_id != user_id:
+            peer_msg = session.exec(
+                select(ChatMessage)
+                .where(ChatMessage.unique_chat_id == unique_chat_id)
+                .where(ChatMessage.from_user_id == other_user_id)
+                .order_by(ChatMessage.created_at.desc())
+            ).first()
+            if peer_msg:
+                peer_name = peer_msg.from_name or peer_msg.from_username or f"ID {other_user_id}"
+        
+        # Количество сообщений
+        msg_count = session.exec(
+            select(ChatMessage)
+            .where(ChatMessage.unique_chat_id == unique_chat_id)
+        ).all()
+        
+        result.append({
+            'unique_chat_id': unique_chat_id,
+            'peer_name': peer_name,
+            'peer_user_id': other_user_id,
+            'last_message': (last_msg.content or '')[:100] if last_msg else '',
+            'last_message_at': last_msg.created_at.isoformat() if last_msg else None,
+            'messages_count': len(msg_count),
+            'unread_count': 0
+        })
+    
+    # Сортируем по времени последнего сообщения
+    result.sort(key=lambda x: x['last_message_at'] or '', reverse=True)
+    
+    session.close()
+    return jsonify(result)
+
+
+@api_app.route('/api/chat/<chat_id>', methods=['GET'])
+def api_get_chat_history(chat_id):
+    """Получить историю конкретного чата"""
+    init_data = get_init_data_from_request()
+    if not validate_telegram_data(init_data):
+        return jsonify({'error': 'Unauthorized'}), 401
+    
+    user = get_user_from_init(init_data)
+    if not user:
+        return jsonify({'error': 'No user'}), 400
+    
+    user_id = user['id']
+    
+    # Проверяем что чат принадлежит пользователю
+    if not chat_id.startswith(f"{user_id}_"):
+        return jsonify({'error': 'Access denied'}), 403
+    
+    session = SQLSession(db.engine)
+    messages = session.exec(
+        select(ChatMessage)
+        .where(ChatMessage.unique_chat_id == chat_id)
+        .order_by(ChatMessage.created_at.asc())
+    ).all()
+    
+    result = []
+    for msg in messages:
+        content = msg.content or ''
+        # Убираем маркер удаления из текста
+        is_deleted = msg.is_deleted or '🗑️' in content
+        if is_deleted:
+            content = content.replace('🗑️', '').strip()
+        
+        result.append({
+            'message_id': msg.message_id,
+            'from_user_id': msg.from_user_id,
+            'from_username': msg.from_username,
+            'from_name': msg.from_name,
+            'content': content,
+            'content_type': msg.content_type or 'text',
+            'file_id': msg.file_id,
+            'media_uid': msg.media_uid,
+            'is_deleted': is_deleted,
+            'edited_at': msg.edited_at.isoformat() if msg.edited_at else None,
+            'created_at': msg.created_at.isoformat() if msg.created_at else None
+        })
+    
+    session.close()
+    return jsonify(result)
+
+
+@api_app.route('/api/settings', methods=['GET', 'POST'])
+def api_settings():
+    init_data = get_init_data_from_request()
+    if not validate_telegram_data(init_data):
+        return jsonify({'error': 'Unauthorized'}), 401
+    
+    if request.method == 'POST':
+        # Сохраняем настройки (пока просто возвращаем OK)
+        data = request.json or {}
+        return jsonify({'status': 'ok', 'settings': data})
+    
+    return jsonify({'theme': 'dark', 'notifications': True, 'language': 'ru'})
+
+
+@api_app.route('/api/delpn', methods=['GET'])
+def api_delpn():
+    return jsonify({
+        'description': 'Защищённый VPN для безопасного интернета',
+        'is_connected': False,
+        'status': 'Не подключено',
+        'tariff': '299 руб/мес',
+        'features': [
+            'Шифрование трафика',
+            'Анонимность в сети',
+            'Обход блокировок',
+            'Высокая скорость',
+            'Более 50 серверов'
+        ],
+        'connect_url': f'https://t.me/{BOT_USERNAME}'
+    })
+
+
+@api_app.route('/api/giveaway', methods=['GET'])
+def api_giveaway():
+    return jsonify({
+        'title': 'Розыгрыш подписки',
+        'participants': 142,
+        'end_date': '2026-05-25T14:00:00'
+    })
+
+
+@api_app.route('/api/health', methods=['GET'])
+def api_health():
+    return jsonify({'status': 'ok', 'bot': BOT_USERNAME})
+
+
+def run_api():
+    """Запуск Flask API в отдельном потоке"""
+    port = int(os.getenv('PORT', 8080))
+    api_app.run(host='0.0.0.0', port=port, use_reloader=False)
+
+
+# ============ Модели БД ============
 
 class Subscription(SQLModel, table=True):
     user_id: int = Field(primary_key=True)
@@ -67,6 +348,8 @@ class ChatMessage(SQLModel, table=True):
     edited_at: datetime | None = None
     created_at: datetime = Field(default_factory=datetime.now)
 
+
+# ============ Утилиты бота ============
 
 def is_user_active(session: SQLSession, user_id: int) -> bool:
     sub = session.get(Subscription, user_id)
@@ -237,6 +520,8 @@ async def send_subscription_invoice(
     )
 
 
+# ============ Хендлеры бота ============
+
 @dp.message(CommandStart())
 async def cmd_start(message: MessageType):
     args = (message.text or "").split(maxsplit=1)
@@ -323,8 +608,6 @@ async def render_all_chats(callback: CallbackQuery, session: SQLSession) -> None
     await callback.message.edit_text("💬 Ваши чаты:", reply_markup=keyboard)
 
 
-
-
 @dp.callback_query(lambda c: c.data=="info")
 async def cb_info(callback: CallbackQuery):
     kb=InlineKeyboardMarkup(inline_keyboard=[
@@ -333,6 +616,7 @@ async def cb_info(callback: CallbackQuery):
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="back")]
     ])
     await callback.message.edit_text("ℹ️ <b>Информация</b>\n\nПоддержка: @DelixorSupport\n\nВыберите нужный документ:", reply_markup=kb)
+
 @dp.callback_query(lambda c: c.data == "profile")
 async def cb_profile(callback: CallbackQuery):
     session = SQLSession(db.engine)
@@ -869,6 +1153,12 @@ async def cleanup_old_messages():
 async def main():
     db.init()
     SQLModel.metadata.create_all(db.engine)
+    
+    # Запускаем Flask API в отдельном потоке
+    api_thread = threading.Thread(target=run_api, daemon=True)
+    api_thread.start()
+    print(f"✅ Flask API запущен на порту {os.getenv('PORT', 8080)}")
+    
     asyncio.create_task(cleanup_old_messages())
     asyncio.create_task(periodic_refresh_menu_links())
     await dp.start_polling(bot)
