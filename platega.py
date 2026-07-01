@@ -1,8 +1,5 @@
-# platega.py
 import requests
-import json
 import logging
-from datetime import datetime, timedelta
 from typing import Optional, Dict
 
 logger = logging.getLogger(__name__)
@@ -14,7 +11,7 @@ class PlategaPayment:
         self.merchant_id = merchant_id
         self.secret_key = secret_key
         
-    def create_payment(self, user_id: int, amount: float, plan: str, order_id: str) -> Optional[Dict]:
+    def create_payment(self, user_id: int, amount: float, plan: str, order_id: str, callback_url: str) -> Optional[Dict]:
         """Создание платежа в Platega.io"""
         
         headers = {
@@ -23,9 +20,6 @@ class PlategaPayment:
             "Content-Type": "application/json"
         }
         
-        # URL для callback (замените на ваш домен)
-        callback_url = "https://your-domain.com/api/platega/callback"
-        
         payload = {
             "amount": amount,
             "currency": "RUB",
@@ -33,7 +27,7 @@ class PlategaPayment:
             "description": f"Подписка Delixor Plus - {plan}",
             "method": 2,  # СБП
             "url_status": callback_url,
-            "lifetime": 3600  # Время жизни платежа в секундах
+            "lifetime": 3600  # Время жизни платежа 1 час
         }
         
         try:
@@ -56,8 +50,6 @@ class PlategaPayment:
             return None
     
     def verify_callback(self, data: Dict) -> bool:
-        """Проверка подлинности callback от Platega"""
-        # Здесь нужно добавить проверку подписи если Platega её предоставляет
-        # Пока просто проверяем наличие обязательных полей
+        """Проверка подлинности callback"""
         required_fields = ["order_id", "status", "amount"]
         return all(field in data for field in required_fields)
