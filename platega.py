@@ -1,4 +1,6 @@
-import requests
+import urllib.request
+import urllib.error
+import json
 import logging
 from typing import Optional, Dict
 
@@ -31,20 +33,40 @@ class PlategaPayment:
         }
         
         try:
-            response = requests.post(PLATEGA_API_URL, json=payload, headers=headers, timeout=10)
-            response.raise_for_status()
-            result = response.json()
+            # Создаем запрос
+            data = json.dumps(payload).encode('utf-8')
+            req = urllib.request.Request(
+                PLATEGA_API_URL,
+                data=data,
+                headers=headers,
+                method='POST'
+            )
             
-            if result.get("data") and result["data"].get("payment_url"):
-                return {
-                    "success": True,
-                    "payment_url": result["data"]["payment_url"],
-                    "order_id": order_id
-                }
-            else:
-                logger.error(f"Platega error: {result}")
-                return None
+            # Отправляем запрос
+            with urllib.request.urlopen(req, timeout=10) as response:
+                result = json.loads(response.read().decode('utf-8'))
                 
+                if result.get("data") and result["data"].get("payment_url"):
+                    return {
+                        "success": True,
+                        "payment_url": result["data"]["payment_url"],
+                        "order_id": order_id
+                    }
+                else:
+                    logger.error(f"Platega error: {result}")
+                    return None
+                    
+        except urllib.error.HTTPError as e:
+            logger.error(f"Platega HTTP error: {e.code} - {e.reason}")
+            try:
+                error_body = e.read().decode('utf-8')
+                logger.error(f"Error body: {error_body}")
+            except:
+                pass
+            return None
+        except urllib.error.URLError as e:
+            logger.error(f"Platega URL error: {e.reason}")
+            return None
         except Exception as e:
             logger.error(f"Failed to create Platega payment: {e}")
             return None
