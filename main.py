@@ -24,14 +24,29 @@ from aiogram.types import (
     WebAppInfo,
 )
 from babel.dates import format_date
-from sqlmodel import Field, SQLModel, Session as SQLSession, select
+from sqlmodel import SQLModel, Field, Session as SQLSession, select
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 
 import db
+from platega import PlategaPayment
 
 TOKEN = "8016703176:AAHeEpjl5UJp_Meg0H6OkZ44HEx3-WU4SGI"
-BOT_USERNAME = "testing_lirikoww_bot"
+BOT_USERNAME = "DelixorBot"
+
+# Конфигурация Platega
+PLATEGA_MERCHANT_ID = "555856bc-3f51-4859-b8be-83bcae5093e7"  # Замените на ваш Merchant ID
+PLATEGA_SECRET_KEY = "giOFXHhoXcILMALHJTiV0DBAbC3uVDv9dmSglC61IdYmRaB7PO5tuKlXpTnubUUATq9nDiBRz01EVMkkZ0hebS4x9G3x9G6SDiu9"    # Замените на ваш Secret Key
+PLATEGA_CALLBACK_URL = "https://bot-1782782304-4136-bynexadmin.bothost.tech/api/platega/callback"
+
+platega = PlategaPayment(PLATEGA_MERCHANT_ID, PLATEGA_SECRET_KEY)
+
+# Тарифы подписки
+SUBSCRIPTION_PLANS = {
+    "month": {"amount": 199, "days": 30, "title": "Месяц"},
+    "quarter": {"amount": 399, "days": 90, "title": "3 месяца"},
+    "year": {"amount": 599, "days": 365, "title": "Год"}
+}
 
 bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
@@ -271,6 +286,130 @@ def api_giveaway():
     })
 
 
+# ============ НОВЫЕ API ENDPOINTS ДЛЯ ПЛАТЕЖЕЙ ============
+
+@api_app.route('/api/payment/create', methods=['POST'])
+def api_create_payment():
+    """Создание платежа через Platega.io"""
+    init_data = get_init_data_from_request()
+    if not validate_telegram_data(init_data):
+        return jsonify({'error': 'Unauthorized'}), 401
+    
+    user = get_user_from_init(init_data)
+    if not user:
+        return jsonify({'error': 'No user'}), 400
+    
+    data = request.json or {}
+    plan = data.get('plan')
+    
+    if plan not in SUBSCRIPTION_PLANS:
+        return jsonify({'error': 'Invalid plan'}), 400
+    
+    user_id = user['id']
+    session = SQLSession(db.engine)
+    
+    # Проверяем активную подписку
+    if is_user_active(session, user_id):
+        sub = session.get(Subscription, user_id)
+        session.close()
+        return jsonify({
+            'error': 'Already has active subscription',
+            'active_until': sub.active_until.isoformat()
+        }), 400
+    
+    session.close()
+    
+    # Создаем платеж
+    plan_info = SUBSCRIPTION_PLANS[plan]
+    order_id = f"delixor_{user_id}_{plan}_{int(datetime.now().timestamp())}"
+    
+    result = platega.create_payment(
+        user_id=user_id,
+        amount=plan_info["amount"],
+        plan=plan_info["title"],
+        order_id=order_id,
+        callback_url=PLATEGA_CALLBACK_URL
+    )
+    
+    if result and result["success"]:
+        return jsonify({
+            'success': True,
+            'payment_url': result["payment_url"],
+            'order_id': result["order_id"]
+        })
+    else:
+        return jsonify({'error': 'Failed to create payment'}), 500
+
+
+@api_app.route('/api/platega/callback', methods=['POST'])
+def platega_callback():
+    """Webhook для обработки callback от Platega.io"""
+    data = request.json or {}
+    
+    logging.info(f"Platega callback received: {data}")
+    
+    # Проверяем подлинность
+    if not platega.verify_callback(data):
+        return jsonify({'error': 'Invalid callback'}), 400
+    
+    order_id = data.get('order_id')
+    status = data.get('status')
+    
+    if not order_id or not status:
+        return jsonify({'error': 'Missing fields'}), 400
+    
+    # Парсим order_id: delixor_{user_id}_{plan}_{timestamp}
+    parts = order_id.split('_')
+    if len(parts) < 3:
+        return jsonify({'error': 'Invalid order_id'}), 400
+    
+    try:
+        user_id = int(parts[1])
+        plan = parts[2]
+    except (ValueError, IndexError):
+        return jsonify({'error': 'Invalid order_id format'}), 400
+    
+    # Обрабатываем успешную оплату
+    if status in ['paid', 'success', 'completed']:
+        session = SQLSession(db.engine)
+        plan_info = SUBSCRIPTION_PLANS.get(plan)
+        
+        if plan_info:
+            sub = session.get(Subscription, user_id)
+            if not sub:
+                sub = Subscription(user_id=user_id)
+            
+            # Устанавливаем дату окончания подписки
+            if sub.active_until and sub.active_until > datetime.now():
+                # Если уже есть активная подписка, продлеваем
+                sub.active_until += timedelta(days=plan_info["days"])
+            else:
+                # Новая подписка
+                sub.active_until = datetime.now() + timedelta(days=plan_info["days"])
+            
+            sub.last_charge_id = order_id
+            session.add(sub)
+            session.commit()
+            
+            # Отправляем уведомление пользователю
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    bot.send_message(
+                        chat_id=user_id,
+                        text=f"✅ <b>Подписка Delixor Plus активирована!</b>\n\n"
+                             f"📅 Действует до: {format_date(sub.active_until, 'd MMMM yyyy', locale='ru')}\n"
+                             f"💎 Теперь вам доступны все функции бота!",
+                        parse_mode="HTML"
+                    ),
+                    loop=asyncio.get_event_loop()
+                )
+            except Exception as e:
+                logging.error(f"Failed to send notification: {e}")
+        
+        session.close()
+    
+    return jsonify({'status': 'ok'})
+
 
 # ============ Модели БД ============
 
@@ -443,44 +582,6 @@ async def send_saved_media_by_uid(message: MessageType, media_uid: str) -> None:
         await message.answer("⚠️ Этот тип медиа пока не поддерживается.")
 
 
-async def send_subscription_invoice(
-    bot_instance: Bot, session: SQLSession, user_id: int, period: str
-) -> None:
-    if is_user_active(session, user_id):
-        sub = session.get(Subscription, user_id)
-        await bot_instance.send_message(
-            chat_id=user_id,
-            text=(
-                f"⚠️ У вас уже есть активная подписка до "
-                f"{format_date(sub.active_until, 'd MMMM', locale='ru')}.\n"
-                "Новая подписка оформить нельзя пока старая активна."
-            ),
-        )
-        return
-
-    if period == "month":
-        amount = 100
-        title = "Подписка на месяц в DelixorBOT"
-    elif period == "quarter":
-        amount = 270
-        title = "Подписка на квартал в DelixorBOT"
-    elif period == "year":
-        amount = 1000
-        title = "Подписка на год в DelixorBOT"
-    else:
-        await bot_instance.send_message(chat_id=user_id, text="⚠️ Неизвестный период оплаты.")
-        return
-
-    await bot_instance.send_invoice(
-        chat_id=user_id,
-        title=title,
-        description=f"💫 Delixor - модифицированный мод для Telegram от разработчиков BynexVPN{title}",
-        payload=f"pay_{period}_{user_id}_{int(datetime.now().timestamp())}",
-        currency="XTR",
-        prices=[{"label": title, "amount": amount}],
-    )
-
-
 @dp.message(CommandStart())
 async def cmd_start(message: MessageType):
     args = (message.text or "").split(maxsplit=1)
@@ -493,15 +594,6 @@ async def cmd_start(message: MessageType):
             except Exception:
                 pass
             return
-    if len(args) > 1 and args[1].startswith("pay_"):
-        period = args[1].replace("pay_", "", 1).strip()
-        session = SQLSession(db.engine)
-        await send_subscription_invoice(message.bot, session, message.from_user.id, period)
-        try:
-            await message.delete()
-        except Exception:
-            pass
-        return
 
     session = SQLSession(db.engine)
     webapp_url = build_webapp_url(session, message.from_user)
@@ -541,6 +633,22 @@ def get_interlocutor_name(session: SQLSession, unique_chat_id: str, owner_id: in
 
 async def render_all_chats(callback: CallbackQuery, session: SQLSession) -> None:
     user_id = callback.from_user.id
+    
+    # Проверяем подписку
+    if not is_user_active(session, user_id):
+        await callback.message.edit_text(
+            "🔒 <b>Доступ ограничен</b>\n\n"
+            "Этот раздел доступен только пользователям с активной подпиской Delixor Plus.\n\n"
+            "💎 Оформите подписку через Mini App для доступа ко всем функциям.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="💳 Оформить подписку", web_app=WebAppInfo(url=build_webapp_url(session, callback.from_user)))],
+                    [InlineKeyboardButton(text="⬅️ Назад", callback_data="back")]
+                ]
+            )
+        )
+        return
+    
     chats = session.exec(
         select(ChatMessage.unique_chat_id)
         .where(ChatMessage.unique_chat_id.like(f"{user_id}_%"))
@@ -592,71 +700,6 @@ async def cb_profile(callback: CallbackQuery):
         text += "<b>Подписка:</b> ❌ не активна"
 
     await callback.message.edit_text(text, reply_markup=back_keyboard())
-
-
-@dp.callback_query(lambda c: c.data == "periods")
-async def cb_periods(callback: CallbackQuery):
-    session = SQLSession(db.engine)
-    user_id = callback.from_user.id
-
-    if is_user_active(session, user_id):
-        sub = session.get(Subscription, user_id)
-        await callback.message.edit_text(
-            f"⚠️ У вас уже активная подписка до <b>{format_date(sub.active_until, 'd MMMM', locale='ru')}</b>.\n"
-            "Новая подписка оформить нельзя пока старая активна.",
-            reply_markup=back_keyboard(),
-        )
-        return
-
-    text = (
-        "📌 Доступные подписки:\n\n"
-        "- Месяц: 100 Stars ⭐\n"
-        "- Квартал: 270 Stars ⭐\n"
-        "- Год: 1000 Stars \n\n"
-        "Выберите нужный период для оплаты:"
-    )
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="💳 Месяц", callback_data="pay_month")],
-            [InlineKeyboardButton(text="💳 Квартал", callback_data="pay_quarter")],
-            [InlineKeyboardButton(text="💳 Год", callback_data="pay_year")],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="back")],
-        ]
-    )
-    await callback.message.edit_text(text, reply_markup=keyboard)
-
-
-@dp.callback_query(lambda c: c.data in {"pay_month", "pay_quarter", "pay_year"})
-async def cb_pay_period(callback: CallbackQuery):
-    session = SQLSession(db.engine)
-    user_id = callback.from_user.id
-
-    if is_user_active(session, user_id):
-        sub = session.get(Subscription, user_id)
-        await callback.message.answer(
-            f"⚠️ У вас уже есть активная подписка до {format_date(sub.active_until, 'd MMMM', locale='ru')}.\n"
-            "Новая подписка оформить нельзя пока старая активна."
-        )
-        return
-
-    if callback.data == "pay_month":
-        amount = 100
-        title = "Подписка на месяц"
-    elif callback.data == "pay_quarter":
-        amount = 270
-        title = "Подписка на квартал"
-    else:
-        amount = 1000
-        title = "Подписка на год"
-
-    await callback.message.bot.send_invoice(
-        chat_id=user_id,
-        title=title,
-        description=f"<b>{title} на DelixorBOT</b>",
-        payload=f"{callback.data}_{user_id}_{int(datetime.now().timestamp())}",
-        currency="XTR",
-        prices=[{"label": title, "amount": amount}],
-    )
 
 
 @dp.message(Command("gift"))
@@ -898,9 +941,9 @@ async def save_business(message: MessageType):
     if not is_user_active(session, bc.user_chat_id):
         await message.bot.send_message(
             chat_id=bc.user_chat_id,
-            text="⚠️ У вас нет активной подписки! Оплатите Stars ⭐",
+            text="⚠️ У вас нет активной подписки! Оформите Delixor Plus через Mini App 💎",
             reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[[InlineKeyboardButton(text="💳 Оплатить", callback_data="periods")]]
+                inline_keyboard=[[InlineKeyboardButton(text="💳 Оформить подписку", web_app=WebAppInfo(url=build_webapp_url(session, message.from_user)))]]
             ),
         )
         return
@@ -1130,7 +1173,7 @@ def flask_thread():
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.WARNING)
+    logging.basicConfig(level=logging.INFO)
     
     # Flask в фоновом потоке
     flask_t = threading.Thread(target=flask_thread, daemon=True)
