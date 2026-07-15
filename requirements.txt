@@ -1,8 +1,0 @@
-﻿aiogram
-sqlmodel==0.0.14
-SQLAlchemy>=2.0
-python-dotenv==1.0.0
-babel==2.14.0
-flask
-flask-cors
-requests
